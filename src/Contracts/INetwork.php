@@ -1,6 +1,6 @@
 <?php
 
-namespace CardanoPhp\DataClient;
+namespace CardanoPhp\DataClient\Contracts;
 
 interface INetwork
 {
