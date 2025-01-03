@@ -4,7 +4,14 @@ namespace CardanoPhp\DataClient;
 
 interface ICardano extends
     INetwork,
-    IEpoch
+    IEpoch,
+    IBlock,
+    ITransaction,
+    IAccount,
+    IAddress,
+    IAsset,
+    IPool,
+    IGovernance
 {
     public function __construct(array $options = []);
 }
