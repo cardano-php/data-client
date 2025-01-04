@@ -46,8 +46,8 @@ interface ITransaction
     /**
      * Submits the transactions in CBOR format (if supported).
      *
-     * @param string $txCBOR
+     * @param string $txCBORHex
      * @return array
      */
-    public function transactionSubmit(string $txCBOR): array;
+    public function transactionSubmit(string $txCBORHex): array;
 }

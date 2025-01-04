@@ -12,18 +12,18 @@ interface IBlock
     public function blockCurrent(): array;
 
     /**
-     * Returns info about the requested block number.
+     * Returns info about the requested block.
      *
-     * @param int $blockNumber
+     * @param int $blockHash
      * @return array
      */
-    public function blockInfo(int $blockNumber): array;
+    public function blockInfo(int $blockHash): array;
 
     /**
-     * Return the transactions within the requested block number.
+     * Return the transactions within the requested block.
      *
-     * @param int $blockNumber
+     * @param int $blockHash
      * @return array
      */
-    public function blockTransactions(int $blockNumber): array;
+    public function blockTransactions(int $blockHash): array;
 }

@@ -7,40 +7,40 @@ interface IGovernance
     /**
      * Return information about the requested drep.
      *
-     * @param string $drepId
+     * @param string $bech32DRepID
      * @return array
      */
-    public function governanceDRepInfo(string $drepId): array;
+    public function governanceDRepInfo(string $bech32DRepID): array;
 
     /**
      * Return metadata for the requested drep.
      *
-     * @param string $drepId
+     * @param string $bech32DRepID
      * @param int|null $pageNo
      * @param int|null $resultsPerPage
      * @return array
      */
-    public function governanceDRepMetadata(string $drepId, int|null $pageNo, int|null $resultsPerPage): array;
+    public function governanceDRepMetadata(string $bech32DRepID, int|null $pageNo, int|null $resultsPerPage): array;
 
     /**
      * Return certificate updates for the requested drep.
      *
-     * @param string $drepId
+     * @param string $bech32DRepID
      * @param int|null $pageNo
      * @param int|null $resultsPerPage
      * @return array
      */
-    public function governanceDRepUpdates(string $drepId, int|null $pageNo, int|null $resultsPerPage): array;
+    public function governanceDRepUpdates(string $bech32DRepID, int|null $pageNo, int|null $resultsPerPage): array;
 
     /**
      * Return vote history for the requested drep.
      *
-     * @param string $drepId
+     * @param string $bech32DRepID
      * @param int|null $pageNo
      * @param int|null $resultsPerPage
      * @return array
      */
-    public function governanceDRepVotes(string $drepId, int|null $pageNo, int|null $resultsPerPage): array;
+    public function governanceDRepVotes(string $bech32DRepID, int|null $pageNo, int|null $resultsPerPage): array;
 
     /**
      * Return delegators for the requested drep.
@@ -54,12 +54,12 @@ interface IGovernance
     /**
      * Return list of proposals.
      *
-     * @param string $drepId
+     * @param string $bech32DRepID
      * @param int|null $pageNo
      * @param int|null $resultsPerPage
      * @return array
      */
-    public function governanceProposals(string $drepId, int|null $pageNo, int|null $resultsPerPage): array;
+    public function governanceProposals(string $bech32DRepID, int|null $pageNo, int|null $resultsPerPage): array;
 
     /**
      * Return information about the requested proposal.
