@@ -2,6 +2,8 @@
 
 namespace CardanoPhp\DataClient\Contracts;
 
+use CardanoPhp\DataClient\Enums\CardanoNetwork;
+
 interface ICardano extends
     INetwork,
     IEpoch,
@@ -13,5 +15,8 @@ interface ICardano extends
     IPool,
     IGovernance
 {
-    public function __construct(array $options = []);
+    public function __construct(
+        CardanoNetwork $cardanoNetwork,
+        array $options = [],
+    );
 }
