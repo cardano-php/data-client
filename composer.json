@@ -1,0 +1,22 @@
+{
+    "name": "cardano-php/data-client",
+    "description": "Provide data retrieval client interfaces for common Cardano data providers",
+    "type": "library",
+    "license": "Apache License 2.0",
+    "autoload": {
+        "psr-4": {
+            "CardanoPhp\\DataClient\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Latheesan Kanesamoorthy"
+        },
+        {
+            "name": "Adam Dean"
+        }
+    ],
+    "require": {
+        "php": ">=8.2"
+    }
+}
