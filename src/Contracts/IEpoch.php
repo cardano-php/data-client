@@ -2,20 +2,31 @@
 
 namespace CardanoPhp\DataClient\Contracts;
 
+use CardanoPhp\DataClient\DTOs\Epoch\EpochInfo\EpochInfo;
+use CardanoPhp\DataClient\DTOs\Epoch\ProtocolParams\ProtocolParams;
+
 interface IEpoch
 {
     /**
      * Returns info about the current epoch.
      *
-     * @return array
+     * @return EpochInfo
      */
-    public function epochCurrent(): array;
+    public function epochCurrent(): EpochInfo;
 
     /**
      * Returns info about the requested epoch number.
      *
      * @param int $epochNumber
-     * @return array
+     * @return EpochInfo
      */
-    public function epochInfo(int $epochNumber): array;
+    public function epochInfo(int $epochNumber): EpochInfo;
+
+    /**
+     * Return the epoch protocol parameters for the current or the requested epoch number.
+     *
+     * @param int|null $epochNumber
+     * @return ProtocolParams
+     */
+    public function epochProtocolParams(int|null $epochNumber = null): ProtocolParams;
 }
