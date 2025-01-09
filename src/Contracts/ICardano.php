@@ -5,7 +5,6 @@ namespace CardanoPhp\DataClient\Contracts;
 use CardanoPhp\DataClient\Enums\CardanoNetwork;
 
 interface ICardano extends
-    INetwork,
     IEpoch,
     IBlock,
     ITransaction,
