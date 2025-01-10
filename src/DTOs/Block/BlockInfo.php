@@ -2,8 +2,12 @@
 
 namespace CardanoPhp\DataClient\DTOs\Block;
 
+use CardanoPhp\DataClient\Traits\ToArrayTrait;
+
 final readonly class BlockInfo
 {
+    use ToArrayTrait;
+
     public function __construct(
         public int $unixTimestamp,
         public int $height,
