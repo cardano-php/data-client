@@ -2,22 +2,24 @@
 
 namespace CardanoPhp\DataClient\Contracts;
 
+use CardanoPhp\DataClient\DTOs\Block\BlockInfo;
+
 interface IBlock
 {
     /**
      * Returns info about the current block.
      *
-     * @return array
+     * @return BlockInfo
      */
-    public function blockCurrent(): array;
+    public function blockCurrent(): BlockInfo;
 
     /**
      * Returns info about the requested block.
      *
      * @param int $blockHash
-     * @return array
+     * @return BlockInfo
      */
-    public function blockInfo(int $blockHash): array;
+    public function blockInfo(int $blockHash): BlockInfo;
 
     /**
      * Return the transactions within the requested block.
