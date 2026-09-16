@@ -1,0 +1,18 @@
+cardano-php/data-client
+Copyright 2025 Latheesan Kanesamoorthy
+Copyright 2026 Adam Dean
+
+This product includes software for reading Cardano chain data through a data
+provider: provider interfaces, the data transfer objects they return, and a
+Koios implementation covering the epoch, the protocol parameters and the
+unspent outputs at an address.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this software except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+This product depends on interfaces published by the PHP Framework Interop
+Group (PSR-3, PSR-7, PSR-16, PSR-17 and PSR-18), each licensed under the MIT
+License.

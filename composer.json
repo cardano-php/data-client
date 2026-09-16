@@ -1,13 +1,15 @@
 {
     "name": "cardano-php/data-client",
-    "description": "Provide data retrieval client interfaces for common Cardano data providers",
+    "description": "Data retrieval client interfaces for common Cardano data providers, and a Koios implementation of them.",
     "type": "library",
-    "license": "Apache License 2.0",
-    "autoload": {
-        "psr-4": {
-            "CardanoPhp\\DataClient\\": "src/"
-        }
-    },
+    "license": "Apache-2.0",
+    "version": "0.1.0",
+    "keywords": [
+        "cardano",
+        "koios",
+        "protocol-parameters",
+        "utxo"
+    ],
     "authors": [
         {
             "name": "Latheesan Kanesamoorthy"
@@ -17,6 +19,34 @@
         }
     ],
     "require": {
-        "php": ">=8.2"
-    }
+        "php": ">=8.2",
+        "ext-bcmath": "*",
+        "psr/http-client": "^1.0",
+        "psr/http-factory": "^1.0",
+        "psr/http-message": "^1.1 || ^2.0",
+        "psr/log": "^2.0 || ^3.0",
+        "psr/simple-cache": "^2.0 || ^3.0"
+    },
+    "require-dev": {
+        "guzzlehttp/psr7": "^2.6",
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "CardanoPhp\\DataClient\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "CardanoPhp\\DataClient\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
 }
