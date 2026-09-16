@@ -26,7 +26,5 @@ final readonly class BlockInfo
         public string $previousBlockHash,
         public string $nextBlockHash,
         public int $confirmations
-    )
-    {
-    }
+    ) {}
 }
