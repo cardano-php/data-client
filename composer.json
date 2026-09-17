@@ -3,7 +3,6 @@
     "description": "Data retrieval client interfaces for common Cardano data providers, and a Koios implementation of them.",
     "type": "library",
     "license": "Apache-2.0",
-    "version": "0.1.0",
     "keywords": [
         "cardano",
         "koios",
