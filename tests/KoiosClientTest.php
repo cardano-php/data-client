@@ -724,6 +724,19 @@ class KoiosClientTest extends TestCase
         }
     }
 
+    public function test_a_signed_transaction_with_a_trailing_newline_is_refused_before_anything_is_sent(): void
+    {
+        $http = $this->recordedKoios();
+
+        $this->expectException(InvalidArgumentException::class);
+
+        try {
+            $this->koios($http)->submitTransaction("84a\n");
+        } finally {
+            $this->assertSame(0, $http->sentTo('submittx'));
+        }
+    }
+
     public function test_a_signed_transaction_that_is_not_hex_is_refused_before_anything_is_sent(): void
     {
         $http = $this->recordedKoios();

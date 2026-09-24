@@ -289,13 +289,19 @@ class KoiosClient implements IAddressUtxos, IEpochParameters, IProtocolParamsCro
 
     public function submitTransaction(string $signedTxCborHex): string
     {
-        // `+`, not `*`: an empty string is zero bytes, never a signed transaction, and
-        // `*` matched it anyway, letting it through as if it were valid hexadecimal.
-        if (preg_match('/^[0-9a-fA-F]+$/', $signedTxCborHex) !== 1 || strlen($signedTxCborHex) % 2 !== 0) {
+        // `+`, not `*`: an empty string is zero bytes, never a signed transaction. `\A` and
+        // `\z`, not `^` and `$`: `$` also matches before a trailing newline, so "84a\n"
+        // passed as four even-length hex characters and went out as an empty body.
+        if (preg_match('/\A[0-9a-fA-F]+\z/', $signedTxCborHex) !== 1 || strlen($signedTxCborHex) % 2 !== 0) {
             throw new InvalidArgumentException('The signed transaction is not valid hexadecimal.');
         }
 
-        $body = $this->api->postBytes('submittx', (string) hex2bin($signedTxCborHex), 'application/cbor');
+        $bytes = hex2bin($signedTxCborHex);
+        if ($bytes === false || $bytes === '') {
+            throw new InvalidArgumentException('The signed transaction is not valid hexadecimal.');
+        }
+
+        $body = $this->api->postBytes('submittx', $bytes, 'application/cbor');
 
         return strtolower($this->readSubmittedHash($body));
     }

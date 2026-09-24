@@ -119,7 +119,14 @@ final class JsonEndpoint
         }
 
         $status = $response->getStatusCode();
-        $responseBody = (string) $response->getBody();
+
+        try {
+            $responseBody = (string) $response->getBody();
+        } catch (\RuntimeException $e) {
+            // The request was sent and a status came back, so the node may hold the
+            // transaction; a body that cannot be read changes nothing about that.
+            throw SubmissionOutcomeUnknown::unreachable($path, $this->label, $e->getMessage(), $e);
+        }
 
         if ($status === 400) {
             throw TransactionRejected::rejected($path, $this->label, $status, $responseBody);
