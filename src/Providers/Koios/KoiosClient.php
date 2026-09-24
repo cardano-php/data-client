@@ -15,10 +15,12 @@ use CardanoPhp\DataClient\DTOs\Epoch\ProtocolParams\ProtocolParams;
 use CardanoPhp\DataClient\Enums\CardanoNetwork;
 use CardanoPhp\DataClient\Exceptions\MalformedProviderResponse;
 use CardanoPhp\DataClient\Exceptions\ProviderRequestFailed;
+use CardanoPhp\DataClient\Exceptions\SubmissionOutcomeUnknown;
 use CardanoPhp\DataClient\Exceptions\UnsupportedNetwork;
 use CardanoPhp\DataClient\Http\JsonEndpoint;
 use CardanoPhp\DataClient\Support\Number;
 use InvalidArgumentException;
+use JsonException;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\StreamFactoryInterface;
@@ -287,24 +289,67 @@ class KoiosClient implements IAddressUtxos, IEpochParameters, IProtocolParamsCro
 
     public function submitTransaction(string $signedTxCborHex): string
     {
-        if (preg_match('/^[0-9a-fA-F]*$/', $signedTxCborHex) !== 1 || strlen($signedTxCborHex) % 2 !== 0) {
+        // `+`, not `*`: an empty string is zero bytes, never a signed transaction, and
+        // `*` matched it anyway, letting it through as if it were valid hexadecimal.
+        if (preg_match('/^[0-9a-fA-F]+$/', $signedTxCborHex) !== 1 || strlen($signedTxCborHex) % 2 !== 0) {
             throw new InvalidArgumentException('The signed transaction is not valid hexadecimal.');
         }
 
-        $hash = $this->api->postBytes('submittx', (string) hex2bin($signedTxCborHex), 'application/cbor');
+        $body = $this->api->postBytes('submittx', (string) hex2bin($signedTxCborHex), 'application/cbor');
 
-        if (! is_string($hash) || preg_match('/^[0-9a-fA-F]{64}$/', $hash) !== 1) {
-            throw MalformedProviderResponse::shape('submittx', 'a 64-character transaction hash');
+        return strtolower($this->readSubmittedHash($body));
+    }
+
+    /**
+     * The hash a successful `submittx` answers with, read either of the two shapes Koios
+     * has been seen to use for it: a bare 64-character hex string with no JSON envelope, or
+     * that same string quoted as JSON, which is the shape Koios's own published example
+     * shows. A 2xx status means the node was reached either way, so a body that is neither
+     * is reported as an outcome this package cannot read rather than as a malformed
+     * response, which would say the opposite: that nothing happened.
+     */
+    private function readSubmittedHash(string $body): string
+    {
+        $trimmed = trim($body);
+
+        if (preg_match('/^[0-9a-fA-F]{64}$/', $trimmed) === 1) {
+            return $trimmed;
         }
 
-        return $hash;
+        try {
+            $decoded = json_decode($trimmed, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            $decoded = null;
+        }
+
+        if (is_string($decoded) && preg_match('/^[0-9a-fA-F]{64}$/', $decoded) === 1) {
+            return $decoded;
+        }
+
+        throw SubmissionOutcomeUnknown::unreadableBody('submittx', $this->network->value, $body);
     }
 
     public function transactionConfirmations(array $txHashes): array
     {
-        $confirmations = [];
+        // Koios matches a hash byte for byte, so an uppercase input it has never seen
+        // lettered that way comes back as a row it does not recognize even when it holds
+        // the same transaction. Every hash is lowercased for the request and for matching
+        // the rows that come back; the caller's own strings, whatever case they used, are
+        // restored only in the keys of the map this method returns.
+        $lowercaseWanted = [];
 
-        foreach ($this->batchedForRequestBody($txHashes) as $batch) {
+        foreach ($txHashes as $hash) {
+            $lowercaseWanted[strtolower($hash)] = true;
+        }
+
+        // Deduplicated before batching: a hash repeated in the input, including one
+        // repeated under a different case, is still one hash to ask Koios about, and
+        // asking twice would spend a second request on an answer already coming back.
+        $uniqueLowercaseHashes = array_keys($lowercaseWanted);
+
+        $confirmationsByLowercaseHash = [];
+
+        foreach ($this->batchedForRequestBody($uniqueLowercaseHashes) as $batch) {
             $rows = $this->api->post('tx_status', ['_tx_hashes' => $batch]);
 
             if (! is_array($rows) || ! array_is_list($rows)) {
@@ -316,7 +361,7 @@ class KoiosClient implements IAddressUtxos, IEpochParameters, IProtocolParamsCro
                     throw MalformedProviderResponse::shape('tx_status', 'a row carrying tx_hash and num_confirmations');
                 }
 
-                $confirmations[(string) $row['tx_hash']] = $row['num_confirmations'] === null
+                $confirmationsByLowercaseHash[strtolower((string) $row['tx_hash'])] = $row['num_confirmations'] === null
                     ? null
                     : Number::integer('num_confirmations', $row['num_confirmations']);
             }
@@ -326,10 +371,16 @@ class KoiosClient implements IAddressUtxos, IEpochParameters, IProtocolParamsCro
         // null confirmations for one it does not recognize. Nothing in the documented
         // schema promises that row will always be there, so a hash that did not come back
         // at all is still reported, as null, rather than silently missing from the map.
-        foreach ($txHashes as $hash) {
-            if (! array_key_exists($hash, $confirmations)) {
-                $confirmations[$hash] = null;
+        foreach ($uniqueLowercaseHashes as $hash) {
+            if (! array_key_exists($hash, $confirmationsByLowercaseHash)) {
+                $confirmationsByLowercaseHash[$hash] = null;
             }
+        }
+
+        $confirmations = [];
+
+        foreach ($txHashes as $hash) {
+            $confirmations[$hash] = $confirmationsByLowercaseHash[strtolower($hash)];
         }
 
         return $confirmations;

@@ -4,6 +4,8 @@ namespace CardanoPhp\DataClient\Http;
 
 use CardanoPhp\DataClient\Exceptions\MalformedProviderResponse;
 use CardanoPhp\DataClient\Exceptions\ProviderRequestFailed;
+use CardanoPhp\DataClient\Exceptions\SubmissionOutcomeUnknown;
+use CardanoPhp\DataClient\Exceptions\TransactionRejected;
 use JsonException;
 use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Http\Client\ClientInterface;
@@ -19,6 +21,11 @@ use Psr\Http\Message\StreamFactoryInterface;
  * everything a reading of chain data cannot be correct without: an error status is never an
  * empty result, an undecodable body is never an empty result, and a connection that failed
  * is tried again rather than reported as an address holding nothing.
+ *
+ * That retry rule is for `get()` and `post()` only. Both read the chain, so a repeated
+ * request has no side effect worth worrying about. `postBytes()` sends a signed
+ * transaction, where a repeated call is not free of consequence in the same way, and it
+ * never retries on its own; see its own docblock for why.
  *
  * @internal
  */
@@ -68,33 +75,65 @@ final class JsonEndpoint
     /**
      * One POST of bytes the caller has already encoded, for an endpoint that reads a body
      * Koios does not treat as JSON at all: a signed transaction, sent as raw CBOR under
-     * `Content-Type: application/cbor` rather than wrapped in a JSON envelope.
+     * `Content-Type: application/cbor` rather than wrapped in a JSON envelope. Returns the
+     * raw 2xx response body; reading a transaction hash out of it is Koios's own wire shape
+     * and is done by the caller, not here.
      *
-     * The status-code rule is the same as `get()` and `post()`: a status the provider chose
-     * to send is never retried. What is different is the body of a failure. Koios documents
-     * no schema for a rejected submission, but what it sends there is the only place a
-     * ledger validation error is written down, so that body is read and carried into the
-     * exception here, where `get()` and `post()` discard it because their endpoints answer
-     * nothing on failure worth reading.
+     * This call is made exactly once and never retried, on any outcome, which is the one
+     * way this method's behavior departs from `get()` and `post()`. Both of those read the
+     * chain, so a repeated request costs nothing worth worrying about. A transaction
+     * submission is not that: a connection failure here does not say whether the node ever
+     * saw the request, and retrying blind can land the retry on a node that already applied
+     * the first attempt, which then answers the retry with a rejection that has nothing to
+     * do with the transaction itself, such as an input the first attempt already spent.
+     * Reported as a rejection, that is a lie about the original submission. Resubmitting
+     * the same signed bytes is not unsafe, since the ledger applies a transaction once,
+     * keyed by its hash, but deciding to do it belongs to the caller, who can first check
+     * the chain for that hash, not to a retry loop that cannot.
      *
-     * A connection that never completed is retried exactly as it is for `get()` and
-     * `post()`, which for most calls is a request repeated with no side effect worth
-     * worrying about. A transaction submission is not quite that: the connection could have
-     * dropped after the node accepted it. Retrying anyway is still correct, because
-     * resubmitting the same signed bytes is not a second transaction: the ledger applies
-     * a transaction once, keyed by its hash, and a submission that already reached the
-     * mempool or a block is answered with a rejection on the retry rather than a duplicate
-     * effect. A connection failure says nothing about whether the first attempt was ever
-     * seen, and trying again cannot make that outcome worse.
+     * The outcome is one of three distinct exceptions:
+     *
+     * - HTTP 400 throws `TransactionRejected`: the node read the transaction and refused
+     *   it, with the body Koios sent carrying the reason, since Koios documents no schema
+     *   for a rejection and that body is the only place it is written down.
+     * - a connection failure, a timeout, or a 5xx throws `SubmissionOutcomeUnknown`: the
+     *   request may have reached the node regardless, so the caller must check the chain
+     *   before assuming anything.
+     * - any other error status (401, 403, 413, 429, and the like) throws the ordinary
+     *   `ProviderRequestFailed`: the provider refused the request before the node had a
+     *   chance to see it, so nothing was submitted.
      */
-    public function postBytes(string $path, string $body, string $contentType): mixed
+    public function postBytes(string $path, string $body, string $contentType): string
     {
-        $request = $this->requests
-            ->createRequest('POST', $this->url($path, []))
-            ->withHeader('Content-Type', $contentType)
-            ->withBody($this->streams->createStream($body));
+        $request = $this->headers(
+            $this->requests
+                ->createRequest('POST', $this->url($path, []))
+                ->withHeader('Content-Type', $contentType)
+                ->withBody($this->streams->createStream($body))
+        );
 
-        return $this->send($path, $this->headers($request), captureBodyOnFailure: true);
+        try {
+            $response = $this->http->sendRequest($request);
+        } catch (ClientExceptionInterface $e) {
+            throw SubmissionOutcomeUnknown::unreachable($path, $this->label, $e->getMessage(), $e);
+        }
+
+        $status = $response->getStatusCode();
+        $responseBody = (string) $response->getBody();
+
+        if ($status === 400) {
+            throw TransactionRejected::rejected($path, $this->label, $status, $responseBody);
+        }
+
+        if ($status >= 500) {
+            throw SubmissionOutcomeUnknown::serverError($path, $this->label, $status, $responseBody);
+        }
+
+        if ($status < 200 || $status >= 300) {
+            throw ProviderRequestFailed::rejected($path, $this->label, $status, $responseBody);
+        }
+
+        return $responseBody;
     }
 
     /**
@@ -116,7 +155,7 @@ final class JsonEndpoint
             : $request->withHeader('Authorization', 'Bearer '.$this->token);
     }
 
-    private function send(string $path, RequestInterface $request, bool $captureBodyOnFailure = false): mixed
+    private function send(string $path, RequestInterface $request): mixed
     {
         $attempts = max(1, $this->attempts);
         $failure = null;
@@ -144,9 +183,7 @@ final class JsonEndpoint
                 // No fallback and no empty result. A rate-limited or erroring provider
                 // knows nothing about the chain, and an empty UTxO set read out of a 429
                 // reads as an address holding nothing.
-                throw $captureBodyOnFailure
-                    ? ProviderRequestFailed::rejected($path, $this->label, $status, (string) $response->getBody())
-                    : ProviderRequestFailed::status($path, $this->label, $status);
+                throw ProviderRequestFailed::status($path, $this->label, $status);
             }
 
             try {
