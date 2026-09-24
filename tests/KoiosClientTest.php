@@ -6,10 +6,13 @@ use CardanoPhp\DataClient\Enums\CardanoNetwork;
 use CardanoPhp\DataClient\Exceptions\MalformedProviderResponse;
 use CardanoPhp\DataClient\Exceptions\MissingProtocolParameter;
 use CardanoPhp\DataClient\Exceptions\ProviderRequestFailed;
+use CardanoPhp\DataClient\Exceptions\SubmissionOutcomeUnknown;
+use CardanoPhp\DataClient\Exceptions\TransactionRejected;
 use CardanoPhp\DataClient\Exceptions\UnsupportedNetwork;
 use CardanoPhp\DataClient\Providers\Koios\KoiosClient;
 use GuzzleHttp\Psr7\HttpFactory;
 use GuzzleHttp\Psr7\Response;
+use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -526,5 +529,361 @@ class KoiosClientTest extends TestCase
         );
 
         return $this->recordedKoios()->on('address_utxos', ...$answers);
+    }
+
+    public function test_it_submits_a_signed_transaction_and_returns_its_hash(): void
+    {
+        // Koios's own published example of a successful submission: a 202 whose body is
+        // the bare hash as a JSON string, not an object. Recording a genuine acceptance
+        // would mean broadcasting a real signed transaction, which this suite has no
+        // business doing, so this is the documented shape rather than a capture.
+        $hash = '92bcd06b25dfbd89b578d536b4d3b7dd269b7c2aa206ed518012cffe0444d67f';
+        $signed = bin2hex('a signed transaction, as far as this test is concerned');
+
+        $http = $this->recordedKoios()->on(
+            'submittx',
+            new Response(202, ['Content-Type' => 'application/json'], json_encode($hash)),
+        );
+
+        $this->assertSame($hash, $this->koios($http)->submitTransaction($signed));
+
+        $sent = $http->sent()[0];
+        $this->assertSame('application/cbor', $sent->getHeaderLine('Content-Type'));
+        $this->assertSame(hex2bin($signed), (string) $sent->getBody());
+    }
+
+    public function test_the_returned_hash_is_lowercased(): void
+    {
+        $hash = '92BCD06B25DFBD89B578D536B4D3B7DD269B7C2AA206ED518012CFFE0444D67F';
+
+        $http = $this->recordedKoios()->on(
+            'submittx',
+            new Response(202, ['Content-Type' => 'application/json'], json_encode($hash)),
+        );
+
+        $this->assertSame(strtolower($hash), $this->koios($http)->submitTransaction(bin2hex('signed')));
+    }
+
+    public function test_a_bare_hex_body_with_no_json_envelope_is_accepted(): void
+    {
+        // Not every deployment wraps the hash as a JSON string. A bare 64-character body
+        // still means the node accepted the transaction, and refusing to read it would
+        // report an accepted submission as unreadable.
+        $hash = '92bcd06b25dfbd89b578d536b4d3b7dd269b7c2aa206ed518012cffe0444d67f';
+
+        $http = $this->recordedKoios()->on(
+            'submittx',
+            new Response(200, ['Content-Type' => 'text/plain'], $hash),
+        );
+
+        $this->assertSame($hash, $this->koios($http)->submitTransaction(bin2hex('signed')));
+    }
+
+    public function test_a_rejected_submission_is_reported_as_a_transaction_rejection(): void
+    {
+        // Recorded against four arbitrary bytes, which can never decode as a transaction.
+        // What matters here is that Koios answers a rejection with a body explaining why,
+        // and that the body reaches an operator rather than being discarded with the status.
+        $http = $this->recordedKoios()->on(
+            'submittx',
+            $this->json($this->fixture('preprod-submittx-rejected'), 400),
+        );
+
+        $this->expectException(TransactionRejected::class);
+        $this->expectExceptionMessage('TxCmdTxReadError');
+
+        $this->koios($http)->submitTransaction(bin2hex('deadbeef'));
+    }
+
+    public function test_a_connection_failure_during_submission_is_reported_as_an_unknown_outcome_and_is_not_retried(): void
+    {
+        // A dropped connection says nothing about whether the node saw the transaction
+        // first. Retrying here, even once, risks the retry landing on a node that already
+        // applied it and answering with a rejection that has nothing to do with this
+        // transaction, which would then be reported as this submission's own verdict.
+        $http = $this->recordedKoios()->on('submittx', new TransportFailed('connection refused'));
+
+        try {
+            $this->koios($http, options: ['attempts' => 5])->submitTransaction(bin2hex('signed'));
+            $this->fail('Expected a SubmissionOutcomeUnknown exception.');
+        } catch (SubmissionOutcomeUnknown $e) {
+            $this->assertStringContainsString('connection refused', $e->getMessage());
+        }
+
+        $this->assertSame(1, $http->sentTo('submittx'));
+    }
+
+    public function test_a_server_error_during_submission_is_reported_as_an_unknown_outcome_not_a_refusal(): void
+    {
+        // A 5xx is the provider's own failure, not a verdict from the node, and reporting
+        // it as "refused" would tell a caller the transaction is dead when it might not be.
+        $http = $this->recordedKoios()->on('submittx', $this->json(['error' => 'internal'], 503));
+
+        try {
+            $this->koios($http, options: ['attempts' => 3])->submitTransaction(bin2hex('signed'));
+            $this->fail('Expected a SubmissionOutcomeUnknown exception.');
+        } catch (SubmissionOutcomeUnknown $e) {
+            $this->assertStringContainsString('503', $e->getMessage());
+            $this->assertStringNotContainsString('refused', $e->getMessage());
+        }
+
+        $this->assertSame(1, $http->sentTo('submittx'));
+    }
+
+    public function test_a_status_the_provider_answers_without_forwarding_stays_a_provider_request_failure(): void
+    {
+        // A 429 is the provider declining to forward the request at all, which means
+        // nothing was submitted; that is a fact distinct from either a rejection by the
+        // node or an unknown outcome, and it is safe to simply try again.
+        $http = $this->recordedKoios()->on(
+            'submittx',
+            new Response(429, ['Content-Type' => 'application/json'], json_encode(['message' => 'rate limited'])),
+        );
+
+        $this->expectException(ProviderRequestFailed::class);
+        $this->expectExceptionMessage('rate limited');
+
+        $this->koios($http)->submitTransaction(bin2hex('signed'));
+    }
+
+    public function test_a_large_error_body_on_a_provider_refusal_is_truncated(): void
+    {
+        $hugeBody = str_repeat('<html>an error page a proxy sent instead of Koios</html>', 200);
+
+        $http = $this->recordedKoios()->on(
+            'submittx',
+            new Response(413, ['Content-Type' => 'text/html'], $hugeBody),
+        );
+
+        try {
+            $this->koios($http)->submitTransaction(bin2hex('signed'));
+            $this->fail('Expected a ProviderRequestFailed exception.');
+        } catch (ProviderRequestFailed $e) {
+            $this->assertLessThan(strlen($hugeBody), strlen($e->getMessage()));
+            $this->assertStringContainsString('[truncated]', $e->getMessage());
+        }
+    }
+
+    public function test_a_large_rejection_body_from_the_node_is_truncated(): void
+    {
+        $hugeBody = json_encode(str_repeat('a', 5000));
+
+        $http = $this->recordedKoios()->on(
+            'submittx',
+            new Response(400, ['Content-Type' => 'application/json'], $hugeBody),
+        );
+
+        try {
+            $this->koios($http)->submitTransaction(bin2hex('signed'));
+            $this->fail('Expected a TransactionRejected exception.');
+        } catch (TransactionRejected $e) {
+            $this->assertLessThan(strlen($hugeBody), strlen($e->getMessage()));
+            $this->assertStringContainsString('[truncated]', $e->getMessage());
+        }
+    }
+
+    public function test_a_submit_response_that_is_not_a_transaction_hash_is_reported_as_an_unknown_outcome(): void
+    {
+        // A 2xx status means the node was reached; a body this package cannot read as a
+        // hash does not undo that, so it is an unknown outcome rather than a malformed
+        // response, which would wrongly say nothing was submitted.
+        $http = $this->recordedKoios()->on(
+            'submittx',
+            new Response(202, ['Content-Type' => 'application/json'], json_encode('too-short-to-be-a-hash')),
+        );
+
+        $this->expectException(SubmissionOutcomeUnknown::class);
+        $this->expectExceptionMessage('Check the chain');
+
+        $this->koios($http)->submitTransaction(bin2hex('signed'));
+    }
+
+    public function test_a_signed_transaction_that_is_empty_is_refused_before_anything_is_sent(): void
+    {
+        $http = $this->recordedKoios();
+
+        $this->expectException(InvalidArgumentException::class);
+
+        try {
+            $this->koios($http)->submitTransaction('');
+        } finally {
+            $this->assertSame(0, $http->sentTo('submittx'));
+        }
+    }
+
+    public function test_a_signed_transaction_with_an_odd_number_of_characters_is_refused_before_anything_is_sent(): void
+    {
+        $http = $this->recordedKoios();
+
+        $this->expectException(InvalidArgumentException::class);
+
+        try {
+            $this->koios($http)->submitTransaction(bin2hex('signed').'0');
+        } finally {
+            $this->assertSame(0, $http->sentTo('submittx'));
+        }
+    }
+
+    public function test_a_signed_transaction_with_a_trailing_newline_is_refused_before_anything_is_sent(): void
+    {
+        $http = $this->recordedKoios();
+
+        $this->expectException(InvalidArgumentException::class);
+
+        try {
+            $this->koios($http)->submitTransaction("84a\n");
+        } finally {
+            $this->assertSame(0, $http->sentTo('submittx'));
+        }
+    }
+
+    public function test_a_signed_transaction_that_is_not_hex_is_refused_before_anything_is_sent(): void
+    {
+        $http = $this->recordedKoios();
+
+        $this->expectException(InvalidArgumentException::class);
+
+        try {
+            $this->koios($http)->submitTransaction('this is not hex');
+        } finally {
+            $this->assertSame(0, $http->sentTo('submittx'));
+        }
+    }
+
+    public function test_it_reads_confirmations_for_known_unknown_and_mixed_hashes(): void
+    {
+        $known = $this->fixture('preprod-tx-status');
+
+        $http = $this->recordedKoios()->on('tx_status', $this->json($known));
+
+        $confirmations = $this->koios($http)->transactionConfirmations([
+            $known[0]['tx_hash'],
+            $known[1]['tx_hash'],
+            $known[2]['tx_hash'],
+        ]);
+
+        $this->assertSame(2811641, $confirmations[$known[0]['tx_hash']]);
+        $this->assertSame(2170373, $confirmations[$known[1]['tx_hash']]);
+        $this->assertNull($confirmations[$known[2]['tx_hash']]);
+    }
+
+    public function test_a_hash_missing_from_the_response_entirely_is_still_reported_as_unconfirmed(): void
+    {
+        // Nothing in the documented schema promises a row for every hash asked about, so
+        // the client fills in what Koios leaves out rather than reading a shorter response
+        // as an answer for fewer hashes than were asked about.
+        $known = $this->row('preprod-tx-status');
+
+        $http = $this->recordedKoios()->on('tx_status', $this->json([$known]));
+
+        $confirmations = $this->koios($http)->transactionConfirmations([
+            $known['tx_hash'],
+            'a hash koios said nothing at all about',
+        ]);
+
+        $this->assertCount(2, $confirmations);
+        $this->assertSame(2811641, $confirmations[$known['tx_hash']]);
+        $this->assertArrayHasKey('a hash koios said nothing at all about', $confirmations);
+        $this->assertNull($confirmations['a hash koios said nothing at all about']);
+    }
+
+    public function test_an_uppercase_input_hash_gets_its_real_confirmation_count_not_null(): void
+    {
+        // Koios matches a hash byte for byte. Asking about it uppercase, unnormalized,
+        // gets back a row for a hash Koios has never seen written that way, which is
+        // indistinguishable from a hash it does not recognize at all.
+        $known = $this->row('preprod-tx-status');
+        $upper = strtoupper($known['tx_hash']);
+
+        $http = $this->recordedKoios()->on('tx_status', $this->json([$known]));
+
+        $confirmations = $this->koios($http)->transactionConfirmations([$upper]);
+
+        $this->assertSame(2811641, $confirmations[$upper]);
+        $this->assertSame($known['tx_hash'], $http->bodyOf(0)['_tx_hashes'][0]);
+    }
+
+    public function test_duplicate_and_differently_cased_hashes_are_deduplicated_before_batching(): void
+    {
+        $known = $this->row('preprod-tx-status');
+        $lower = $known['tx_hash'];
+        $upper = strtoupper($lower);
+
+        $http = $this->recordedKoios()->on('tx_status', $this->json([$known]));
+
+        $confirmations = $this->koios($http)->transactionConfirmations([$lower, $upper, $lower]);
+
+        // One hash, asked about three times under two different spellings, is still one
+        // hash to ask Koios about.
+        $this->assertSame(1, $http->sentTo('tx_status'));
+        $this->assertCount(1, $http->bodyOf(0)['_tx_hashes']);
+        $this->assertSame($lower, $http->bodyOf(0)['_tx_hashes'][0]);
+
+        // Every distinct string the caller passed in comes back as its own key, keyed
+        // exactly as given rather than normalized to whatever case was sent to Koios.
+        $this->assertCount(2, $confirmations);
+        $this->assertSame(2811641, $confirmations[$lower]);
+        $this->assertSame(2811641, $confirmations[$upper]);
+    }
+
+    public function test_a_status_row_missing_its_confirmation_count_throws(): void
+    {
+        $row = $this->row('preprod-tx-status');
+        unset($row['num_confirmations']);
+
+        $http = $this->recordedKoios()->on('tx_status', $this->json([$row]));
+
+        $this->expectException(MalformedProviderResponse::class);
+
+        $this->koios($http)->transactionConfirmations([$row['tx_hash']]);
+    }
+
+    public function test_it_batches_status_requests_above_the_documented_payload_limit(): void
+    {
+        // Koios documents a strict 1kb request-body cap for the unauthenticated tier. Each
+        // 64-character hash costs 67 bytes once it is quoted and comma-separated against
+        // the others, so a request naming more than fifteen of them would cross the cap,
+        // and the client has to ask in two requests rather than one.
+        $hashes = array_map(
+            static fn (int $i): string => str_pad(dechex($i), 64, '0', STR_PAD_LEFT),
+            range(1, 16),
+        );
+
+        $firstBatch = array_slice($hashes, 0, 15);
+        $secondBatch = array_slice($hashes, 15);
+
+        $http = $this->recordedKoios()->on(
+            'tx_status',
+            $this->json(array_map(static fn (string $h): array => ['tx_hash' => $h, 'num_confirmations' => 10], $firstBatch)),
+            $this->json(array_map(static fn (string $h): array => ['tx_hash' => $h, 'num_confirmations' => 20], $secondBatch)),
+        );
+
+        $confirmations = $this->koios($http)->transactionConfirmations($hashes);
+
+        $this->assertSame(2, $http->sentTo('tx_status'));
+        $this->assertCount(15, $http->bodyOf(0)['_tx_hashes']);
+        $this->assertCount(1, $http->bodyOf(1)['_tx_hashes']);
+        $this->assertSame(10, $confirmations[$firstBatch[0]]);
+        $this->assertSame(20, $confirmations[$secondBatch[0]]);
+        $this->assertCount(16, $confirmations);
+    }
+
+    public function test_a_bearer_token_uses_the_larger_registered_tier_limit_for_batching(): void
+    {
+        // The same sixteen hashes that cross the 1kb public cap fit under the 5kb cap a
+        // bearer token implies, so a client configured with one asks in a single request.
+        $hashes = array_map(
+            static fn (int $i): string => str_pad(dechex($i), 64, '0', STR_PAD_LEFT),
+            range(1, 16),
+        );
+
+        $http = $this->recordedKoios()->on('tx_status', $this->json(array_map(
+            static fn (string $h): array => ['tx_hash' => $h, 'num_confirmations' => 1],
+            $hashes,
+        )));
+
+        $this->koios($http, options: ['token' => 'a-koios-token'])->transactionConfirmations($hashes);
+
+        $this->assertSame(1, $http->sentTo('tx_status'));
     }
 }

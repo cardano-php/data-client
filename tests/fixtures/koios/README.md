@@ -1,8 +1,8 @@
 # Recorded Koios responses
 
-Captured on 15 September 2026 from the public Koios endpoints, unedited. The suite replays
-these instead of calling out, so a test run needs no network and no rate limit, and a
-provider outage cannot turn into a red build.
+Captured on 15 September 2026 from the public Koios endpoints, unedited except where a later
+addition below says otherwise. The suite replays these instead of calling out, so a test run
+needs no network and no rate limit, and a provider outage cannot turn into a red build.
 
 | File                                           | Request                                                                        |
 |------------------------------------------------|--------------------------------------------------------------------------------|
@@ -20,6 +20,8 @@ provider outage cannot turn into a red build.
 | `preprod-address-utxos-page-empty.json`        | `POST preprod/address_utxos?offset=999999&limit=3`, extended                    |
 | `preprod-script-address-utxos.json`            | `POST preprod/address_utxos`, extended, for a script address holding two assets |
 | `preprod-script-address-utxos-unextended.json` | the same request with `_extended: false`                                        |
+| `preprod-tx-status.json`                       | `POST preprod/tx_status`, two spent outputs and one hash nobody minted, captured 24 September 2026 |
+| `preprod-submittx-rejected.json`               | `POST preprod/submittx` of the four bytes `deadbeef`, captured 24 September 2026 |
 
 Three of these record a behavior rather than data: the unextended pair, the three paged
 files, and the genesis epoch.
@@ -43,3 +45,14 @@ nullable while every other count and timestamp is required.
 Two addresses appear in these files. Both are ordinary public preprod addresses, found
 through `asset_addresses` for assets taken off the head of `asset_list`; neither belongs to
 anyone working on this package, and nothing here is a key, a token or a credential.
+
+`preprod-tx-status.json` reuses two transaction hashes already recorded above and adds a
+third made up to be unrecognizable. Koios answered all three, the invented one with a null
+confirmation count, in the same request rather than a separate one, which is the "unknown
+hash" behavior the client relies on and the only way to record it honestly.
+
+`preprod-submittx-rejected.json` is what Koios sent back for a submission that could never
+have been valid: four arbitrary bytes, not a signed transaction. Recording an accepted
+submission would mean broadcasting a real one, which this package has no business doing on
+its own account, so the accepted-response test builds its body from the 64-character hash
+Koios's own published API example uses rather than from a capture.

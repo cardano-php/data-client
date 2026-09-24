@@ -4,6 +4,8 @@ namespace CardanoPhp\DataClient\Http;
 
 use CardanoPhp\DataClient\Exceptions\MalformedProviderResponse;
 use CardanoPhp\DataClient\Exceptions\ProviderRequestFailed;
+use CardanoPhp\DataClient\Exceptions\SubmissionOutcomeUnknown;
+use CardanoPhp\DataClient\Exceptions\TransactionRejected;
 use JsonException;
 use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Http\Client\ClientInterface;
@@ -19,6 +21,11 @@ use Psr\Http\Message\StreamFactoryInterface;
  * everything a reading of chain data cannot be correct without: an error status is never an
  * empty result, an undecodable body is never an empty result, and a connection that failed
  * is tried again rather than reported as an address holding nothing.
+ *
+ * That retry rule is for `get()` and `post()` only. Both read the chain, so a repeated
+ * request has no side effect worth worrying about. `postBytes()` sends a signed
+ * transaction, where a repeated call is not free of consequence in the same way, and it
+ * never retries on its own; see its own docblock for why.
  *
  * @internal
  */
@@ -63,6 +70,77 @@ final class JsonEndpoint
             ->withBody($this->streams->createStream(json_encode($body, JSON_THROW_ON_ERROR)));
 
         return $this->send($path, $this->headers($request));
+    }
+
+    /**
+     * One POST of bytes the caller has already encoded, for an endpoint that reads a body
+     * Koios does not treat as JSON at all: a signed transaction, sent as raw CBOR under
+     * `Content-Type: application/cbor` rather than wrapped in a JSON envelope. Returns the
+     * raw 2xx response body; reading a transaction hash out of it is Koios's own wire shape
+     * and is done by the caller, not here.
+     *
+     * This call is made exactly once and never retried, on any outcome, which is the one
+     * way this method's behavior departs from `get()` and `post()`. Both of those read the
+     * chain, so a repeated request costs nothing worth worrying about. A transaction
+     * submission is not that: a connection failure here does not say whether the node ever
+     * saw the request, and retrying blind can land the retry on a node that already applied
+     * the first attempt, which then answers the retry with a rejection that has nothing to
+     * do with the transaction itself, such as an input the first attempt already spent.
+     * Reported as a rejection, that is a lie about the original submission. Resubmitting
+     * the same signed bytes is not unsafe, since the ledger applies a transaction once,
+     * keyed by its hash, but deciding to do it belongs to the caller, who can first check
+     * the chain for that hash, not to a retry loop that cannot.
+     *
+     * The outcome is one of three distinct exceptions:
+     *
+     * - HTTP 400 throws `TransactionRejected`: the node read the transaction and refused
+     *   it, with the body Koios sent carrying the reason, since Koios documents no schema
+     *   for a rejection and that body is the only place it is written down.
+     * - a connection failure, a timeout, or a 5xx throws `SubmissionOutcomeUnknown`: the
+     *   request may have reached the node regardless, so the caller must check the chain
+     *   before assuming anything.
+     * - any other error status (401, 403, 413, 429, and the like) throws the ordinary
+     *   `ProviderRequestFailed`: the provider refused the request before the node had a
+     *   chance to see it, so nothing was submitted.
+     */
+    public function postBytes(string $path, string $body, string $contentType): string
+    {
+        $request = $this->headers(
+            $this->requests
+                ->createRequest('POST', $this->url($path, []))
+                ->withHeader('Content-Type', $contentType)
+                ->withBody($this->streams->createStream($body))
+        );
+
+        try {
+            $response = $this->http->sendRequest($request);
+        } catch (ClientExceptionInterface $e) {
+            throw SubmissionOutcomeUnknown::unreachable($path, $this->label, $e->getMessage(), $e);
+        }
+
+        $status = $response->getStatusCode();
+
+        try {
+            $responseBody = (string) $response->getBody();
+        } catch (\RuntimeException $e) {
+            // The request was sent and a status came back, so the node may hold the
+            // transaction; a body that cannot be read changes nothing about that.
+            throw SubmissionOutcomeUnknown::unreachable($path, $this->label, $e->getMessage(), $e);
+        }
+
+        if ($status === 400) {
+            throw TransactionRejected::rejected($path, $this->label, $status, $responseBody);
+        }
+
+        if ($status >= 500) {
+            throw SubmissionOutcomeUnknown::serverError($path, $this->label, $status, $responseBody);
+        }
+
+        if ($status < 200 || $status >= 300) {
+            throw ProviderRequestFailed::rejected($path, $this->label, $status, $responseBody);
+        }
+
+        return $responseBody;
     }
 
     /**

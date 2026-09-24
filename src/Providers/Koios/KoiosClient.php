@@ -5,6 +5,8 @@ namespace CardanoPhp\DataClient\Providers\Koios;
 use CardanoPhp\DataClient\Contracts\IAddressUtxos;
 use CardanoPhp\DataClient\Contracts\IEpochParameters;
 use CardanoPhp\DataClient\Contracts\IProtocolParamsCrossCheck;
+use CardanoPhp\DataClient\Contracts\ITransactionStatus;
+use CardanoPhp\DataClient\Contracts\ITransactionSubmit;
 use CardanoPhp\DataClient\DTOs\Address\Asset;
 use CardanoPhp\DataClient\DTOs\Address\Utxo;
 use CardanoPhp\DataClient\DTOs\Address\Value;
@@ -13,9 +15,12 @@ use CardanoPhp\DataClient\DTOs\Epoch\ProtocolParams\ProtocolParams;
 use CardanoPhp\DataClient\Enums\CardanoNetwork;
 use CardanoPhp\DataClient\Exceptions\MalformedProviderResponse;
 use CardanoPhp\DataClient\Exceptions\ProviderRequestFailed;
+use CardanoPhp\DataClient\Exceptions\SubmissionOutcomeUnknown;
 use CardanoPhp\DataClient\Exceptions\UnsupportedNetwork;
 use CardanoPhp\DataClient\Http\JsonEndpoint;
 use CardanoPhp\DataClient\Support\Number;
+use InvalidArgumentException;
+use JsonException;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\StreamFactoryInterface;
@@ -31,7 +36,7 @@ use Psr\Http\Message\StreamFactoryInterface;
  * per call would have to be trusted to pick the right host every time. Bound at
  * construction, a preprod client cannot return a mainnet balance.
  */
-class KoiosClient implements IAddressUtxos, IEpochParameters, IProtocolParamsCrossCheck
+class KoiosClient implements IAddressUtxos, IEpochParameters, IProtocolParamsCrossCheck, ITransactionStatus, ITransactionSubmit
 {
     /**
      * Koios caps a response at 1000 rows and says nothing about the cap in the body, so a
@@ -46,18 +51,35 @@ class KoiosClient implements IAddressUtxos, IEpochParameters, IProtocolParamsCro
         'preview' => 'https://preview.koios.rest/api/v1/',
     ];
 
+    /**
+     * Koios documents a strict cap on request body size: 1kb unauthenticated, 5kb for a
+     * registered (bearer-token) tier. A batch of transaction hashes that would cross it is
+     * refused before a single one is answered, so `transactionConfirmations()` splits the
+     * list rather than trusting Koios to.
+     */
+    public const REQUEST_BODY_LIMIT_PUBLIC = 1024;
+
+    public const REQUEST_BODY_LIMIT_REGISTERED = 5120;
+
     private readonly JsonEndpoint $api;
 
     private readonly int $pageSize;
 
     private readonly int $maxPages;
 
+    private readonly int $requestBodyLimit;
+
     /**
-     * @param  array{base_url?: string, token?: string|null, page_size?: int, max_pages?: int, attempts?: int, retry_delay_microseconds?: int}  $options
+     * @param  array{base_url?: string, token?: string|null, page_size?: int, max_pages?: int, attempts?: int, retry_delay_microseconds?: int, request_body_limit?: int}  $options
      *
      * `max_pages` bounds the UTxO walk. An address with a million unspent outputs is not
      * one anything here is going to spend from, and the ceiling turns a provider that
      * ignores `offset` into an exception instead of an endless walk.
+     *
+     * `request_body_limit` overrides the byte budget `transactionConfirmations()` batches
+     * against. Left unset, it follows the tier a token implies: the public 1kb cap with no
+     * token, the registered 5kb cap with one. A self-hosted instance configures its own
+     * limit in `grest.conf` and may need this set to something else entirely.
      *
      * @throws UnsupportedNetwork when base_url is given as an empty string, which is what a
      *                            deployment that meant to configure an endpoint and did not
@@ -76,8 +98,15 @@ class KoiosClient implements IAddressUtxos, IEpochParameters, IProtocolParamsCro
             throw UnsupportedNetwork::endpoint($network->value);
         }
 
+        $token = $options['token'] ?? null;
+
         $this->pageSize = max(1, $options['page_size'] ?? self::KOIOS_PAGE_SIZE);
         $this->maxPages = max(1, $options['max_pages'] ?? 1000);
+        $this->requestBodyLimit = max(1, $options['request_body_limit'] ?? (
+            $token === null || $token === ''
+                ? self::REQUEST_BODY_LIMIT_PUBLIC
+                : self::REQUEST_BODY_LIMIT_REGISTERED
+        ));
 
         $this->api = new JsonEndpoint(
             baseUrl: $baseUrl,
@@ -85,7 +114,7 @@ class KoiosClient implements IAddressUtxos, IEpochParameters, IProtocolParamsCro
             http: $http,
             requests: $requests,
             streams: $streams,
-            token: $options['token'] ?? null,
+            token: $token,
             attempts: max(1, $options['attempts'] ?? 3),
             retryDelayMicroseconds: max(0, $options['retry_delay_microseconds'] ?? 250_000),
         );
@@ -256,6 +285,145 @@ class KoiosClient implements IAddressUtxos, IEpochParameters, IProtocolParamsCro
         }
 
         return $balance;
+    }
+
+    public function submitTransaction(string $signedTxCborHex): string
+    {
+        // `+`, not `*`: an empty string is zero bytes, never a signed transaction. `\A` and
+        // `\z`, not `^` and `$`: `$` also matches before a trailing newline, so "84a\n"
+        // passed as four even-length hex characters and went out as an empty body.
+        if (preg_match('/\A[0-9a-fA-F]+\z/', $signedTxCborHex) !== 1 || strlen($signedTxCborHex) % 2 !== 0) {
+            throw new InvalidArgumentException('The signed transaction is not valid hexadecimal.');
+        }
+
+        $bytes = hex2bin($signedTxCborHex);
+        if ($bytes === false || $bytes === '') {
+            throw new InvalidArgumentException('The signed transaction is not valid hexadecimal.');
+        }
+
+        $body = $this->api->postBytes('submittx', $bytes, 'application/cbor');
+
+        return strtolower($this->readSubmittedHash($body));
+    }
+
+    /**
+     * The hash a successful `submittx` answers with, read either of the two shapes Koios
+     * has been seen to use for it: a bare 64-character hex string with no JSON envelope, or
+     * that same string quoted as JSON, which is the shape Koios's own published example
+     * shows. A 2xx status means the node was reached either way, so a body that is neither
+     * is reported as an outcome this package cannot read rather than as a malformed
+     * response, which would say the opposite: that nothing happened.
+     */
+    private function readSubmittedHash(string $body): string
+    {
+        $trimmed = trim($body);
+
+        if (preg_match('/^[0-9a-fA-F]{64}$/', $trimmed) === 1) {
+            return $trimmed;
+        }
+
+        try {
+            $decoded = json_decode($trimmed, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            $decoded = null;
+        }
+
+        if (is_string($decoded) && preg_match('/^[0-9a-fA-F]{64}$/', $decoded) === 1) {
+            return $decoded;
+        }
+
+        throw SubmissionOutcomeUnknown::unreadableBody('submittx', $this->network->value, $body);
+    }
+
+    public function transactionConfirmations(array $txHashes): array
+    {
+        // Koios matches a hash byte for byte, so an uppercase input it has never seen
+        // lettered that way comes back as a row it does not recognize even when it holds
+        // the same transaction. Every hash is lowercased for the request and for matching
+        // the rows that come back; the caller's own strings, whatever case they used, are
+        // restored only in the keys of the map this method returns.
+        $lowercaseWanted = [];
+
+        foreach ($txHashes as $hash) {
+            $lowercaseWanted[strtolower($hash)] = true;
+        }
+
+        // Deduplicated before batching: a hash repeated in the input, including one
+        // repeated under a different case, is still one hash to ask Koios about, and
+        // asking twice would spend a second request on an answer already coming back.
+        $uniqueLowercaseHashes = array_keys($lowercaseWanted);
+
+        $confirmationsByLowercaseHash = [];
+
+        foreach ($this->batchedForRequestBody($uniqueLowercaseHashes) as $batch) {
+            $rows = $this->api->post('tx_status', ['_tx_hashes' => $batch]);
+
+            if (! is_array($rows) || ! array_is_list($rows)) {
+                throw MalformedProviderResponse::shape('tx_status', 'a list of rows');
+            }
+
+            foreach ($rows as $row) {
+                if (! is_array($row) || ! array_key_exists('tx_hash', $row) || ! array_key_exists('num_confirmations', $row)) {
+                    throw MalformedProviderResponse::shape('tx_status', 'a row carrying tx_hash and num_confirmations');
+                }
+
+                $confirmationsByLowercaseHash[strtolower((string) $row['tx_hash'])] = $row['num_confirmations'] === null
+                    ? null
+                    : Number::integer('num_confirmations', $row['num_confirmations']);
+            }
+        }
+
+        // Koios has, in practice, answered every hash asked about with a row of its own,
+        // null confirmations for one it does not recognize. Nothing in the documented
+        // schema promises that row will always be there, so a hash that did not come back
+        // at all is still reported, as null, rather than silently missing from the map.
+        foreach ($uniqueLowercaseHashes as $hash) {
+            if (! array_key_exists($hash, $confirmationsByLowercaseHash)) {
+                $confirmationsByLowercaseHash[$hash] = null;
+            }
+        }
+
+        $confirmations = [];
+
+        foreach ($txHashes as $hash) {
+            $confirmations[$hash] = $confirmationsByLowercaseHash[strtolower($hash)];
+        }
+
+        return $confirmations;
+    }
+
+    /**
+     * Hashes grouped into requests that fit the byte budget Koios allows one request body,
+     * found by encoding each candidate batch and measuring it rather than by assuming every
+     * hash is the same length. Nothing here requires a caller to pass only well-formed
+     * 64-character hashes.
+     *
+     * @param  array<int, string>  $hashes
+     * @return array<int, array<int, string>>
+     */
+    private function batchedForRequestBody(array $hashes): array
+    {
+        $batches = [];
+        $current = [];
+
+        foreach ($hashes as $hash) {
+            $candidate = [...$current, $hash];
+
+            if ($current !== [] && strlen(json_encode(['_tx_hashes' => $candidate], JSON_THROW_ON_ERROR)) > $this->requestBodyLimit) {
+                $batches[] = $current;
+                $current = [$hash];
+
+                continue;
+            }
+
+            $current = $candidate;
+        }
+
+        if ($current !== []) {
+            $batches[] = $current;
+        }
+
+        return $batches;
     }
 
     private function assertAnsweredForTheEpochAsked(string $endpoint, int $asked, ?int $answered): void
