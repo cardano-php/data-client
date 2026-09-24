@@ -66,6 +66,38 @@ final class JsonEndpoint
     }
 
     /**
+     * One POST of bytes the caller has already encoded, for an endpoint that reads a body
+     * Koios does not treat as JSON at all: a signed transaction, sent as raw CBOR under
+     * `Content-Type: application/cbor` rather than wrapped in a JSON envelope.
+     *
+     * The status-code rule is the same as `get()` and `post()`: a status the provider chose
+     * to send is never retried. What is different is the body of a failure. Koios documents
+     * no schema for a rejected submission, but what it sends there is the only place a
+     * ledger validation error is written down, so that body is read and carried into the
+     * exception here, where `get()` and `post()` discard it because their endpoints answer
+     * nothing on failure worth reading.
+     *
+     * A connection that never completed is retried exactly as it is for `get()` and
+     * `post()`, which for most calls is a request repeated with no side effect worth
+     * worrying about. A transaction submission is not quite that: the connection could have
+     * dropped after the node accepted it. Retrying anyway is still correct, because
+     * resubmitting the same signed bytes is not a second transaction: the ledger applies
+     * a transaction once, keyed by its hash, and a submission that already reached the
+     * mempool or a block is answered with a rejection on the retry rather than a duplicate
+     * effect. A connection failure says nothing about whether the first attempt was ever
+     * seen, and trying again cannot make that outcome worse.
+     */
+    public function postBytes(string $path, string $body, string $contentType): mixed
+    {
+        $request = $this->requests
+            ->createRequest('POST', $this->url($path, []))
+            ->withHeader('Content-Type', $contentType)
+            ->withBody($this->streams->createStream($body));
+
+        return $this->send($path, $this->headers($request), captureBodyOnFailure: true);
+    }
+
+    /**
      * @param  array<string, scalar>  $query
      */
     private function url(string $path, array $query): string
@@ -84,7 +116,7 @@ final class JsonEndpoint
             : $request->withHeader('Authorization', 'Bearer '.$this->token);
     }
 
-    private function send(string $path, RequestInterface $request): mixed
+    private function send(string $path, RequestInterface $request, bool $captureBodyOnFailure = false): mixed
     {
         $attempts = max(1, $this->attempts);
         $failure = null;
@@ -112,7 +144,9 @@ final class JsonEndpoint
                 // No fallback and no empty result. A rate-limited or erroring provider
                 // knows nothing about the chain, and an empty UTxO set read out of a 429
                 // reads as an address holding nothing.
-                throw ProviderRequestFailed::status($path, $this->label, $status);
+                throw $captureBodyOnFailure
+                    ? ProviderRequestFailed::rejected($path, $this->label, $status, (string) $response->getBody())
+                    : ProviderRequestFailed::status($path, $this->label, $status);
             }
 
             try {

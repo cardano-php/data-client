@@ -88,11 +88,34 @@ compares the two and reports a disagreement rather than acting on it. Koios offe
 properties at all, which is why it is a cross-check and never the source. A provider with no
 equivalent does not implement `IProtocolParamsCrossCheck`, and its absence is not an error.
 
+## Submitting a transaction
+
+```php
+$hash = $koios->submitTransaction($signedTxCborHex);
+$koios->transactionConfirmations([$hash])[$hash]; // null until the network has seen it
+```
+
+`submitTransaction()` sends the signed bytes as `application/cbor`, the shape Koios documents
+for `/submittx`, and returns the 64-character hash the network assigned it. A submission Koios
+refuses carries its error body into the exception message, because that body is the only place
+a ledger validation error is written down. A connection that drops before Koios answers is
+retried, the same as any other read here: resubmitting the same signed bytes is not a second
+transaction, since the ledger applies a transaction once, keyed by its hash.
+
+`transactionConfirmations()` takes any number of hashes and returns a confirmation count for
+each, keyed by hash, with null for one the network has not seen yet. Koios limits a request
+body to 1kb unauthenticated and 5kb with a bearer token; a hash list long enough to cross that
+limit is split into as many requests as it takes rather than failing outright.
+
+Both are declared on their own interfaces, `ITransactionSubmit` and `ITransactionStatus`,
+narrower than `ITransaction`, which describes a provider's own row shapes and has no
+implementation yet.
+
 ## What is in it
 
 | Namespace | What it does |
 | --- | --- |
-| `CardanoPhp\DataClient\Contracts` | What a provider offers. `ICardano` and the interfaces it extends describe a full client returning a provider's own rows; `IEpochParameters`, `IAddressUtxos` and `IProtocolParamsCrossCheck` describe the typed reads this package implements. |
+| `CardanoPhp\DataClient\Contracts` | What a provider offers. `ICardano` and the interfaces it extends describe a full client returning a provider's own rows; `IEpochParameters`, `IAddressUtxos`, `IProtocolParamsCrossCheck`, `ITransactionSubmit` and `ITransactionStatus` describe the typed reads and writes this package implements. |
 | `CardanoPhp\DataClient\DTOs` | What a provider returns, normalized: protocol parameters, epoch and block summaries, unspent outputs, values and assets. |
 | `CardanoPhp\DataClient\Providers\Koios` | Koios, one class, where every Koios wire name is translated and nowhere else. |
 | `CardanoPhp\DataClient\Services` | Caching a parameter set against the epoch it belongs to. |

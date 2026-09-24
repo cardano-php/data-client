@@ -21,4 +21,24 @@ class ProviderRequestFailed extends ProviderException
     {
         return new self("The {$endpoint} endpoint on {$network} could not be reached: {$reason}", 0, $previous);
     }
+
+    /**
+     * A request the provider refused, with the body it sent explaining why.
+     *
+     * Separate from `status()`: a submission Koios rejects carries the reason in a body
+     * with no documented schema rather than in the status code alone, and a ledger error
+     * an operator cannot read is a ledger error an operator cannot act on.
+     */
+    public static function rejected(string $endpoint, string $network, int $status, string $body): self
+    {
+        $body = trim($body);
+
+        return new self(sprintf(
+            'The %s endpoint on %s refused the request with HTTP %d%s',
+            $endpoint,
+            $network,
+            $status,
+            $body === '' ? '' : ": {$body}",
+        ));
+    }
 }
